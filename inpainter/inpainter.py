@@ -61,6 +61,7 @@ class Inpainter():
             self.__update_image(target_point, source_patch)
 
         print('Took {} seconds to complete'.format(time.time() - start_time))
+
         return self.working_image
 
     def __find_front(self):
@@ -76,12 +77,12 @@ class Inpainter():
         """
         Find the priority of each pixel in the front
         """
-        self.__calculate_confidence()
+        new_confidence = self.__calculate_confidence()
         self.__update_data()
 
         # calculate the priority of each pixel in the front
         # the priority is the multiply of the confidence and the data
-        self.priority = self.confidence * self.data * self.front
+        self.priority = new_confidence * self.data * self.front
 
     def __calculate_confidence(self):
         """
@@ -90,7 +91,7 @@ class Inpainter():
         Return:
             the confidence with the update of each pixel in the front
         """
-        # save the old confidence
+        # temporary confidence used in calculating priority
         new_confidence = np.copy(self.confidence)
 
         # get the position of the pixels in the front
@@ -102,15 +103,14 @@ class Inpainter():
             patch = self.__get_patch(point)
 
             # calculate the confidence of the point
-            new_confidence[point[0], point[1]] = np.sum(
-                self.__get_patch_data(self.confidence,
-                                      patch)) / (self.__get_patch_area(patch))
+            new_confidence[point[0],
+                           point[1]] = self.__get_patch_confidence(patch)
 
-        self.confidence = new_confidence
+        return new_confidence
 
     def __update_data(self):
         """
-        Update the data term of each pixel in the target region
+        Update the data term of each pixel in the front
         """
         normal = self.__calculate_normal_matrix()
         gradient = self.__calculate_gradient_matrix()
@@ -126,19 +126,18 @@ class Inpainter():
         Return:
             the normal matrix of the image
         """
+
+        # calculate gradient on working mask
         normal = np.array(np.gradient(self.working_mask.astype(float)))
         x_normal = normal[0]
         y_normal = normal[1]
-
         normal = np.dstack((x_normal, y_normal))
 
-        height, width = normal.shape[:2]
-        norm = np.sqrt(x_normal**2 + y_normal**2) \
-                 .reshape(height, width, 1) \
-                 .repeat(2, axis=2)
+        # normalize the normal
+        norm = self.__2d_to_3d(np.sqrt(x_normal**2 + y_normal**2), 2)
         norm[norm == 0] = 1
-
         unit_normal = normal / norm
+
         return unit_normal
 
     def __calculate_gradient_matrix(self):
@@ -148,25 +147,30 @@ class Inpainter():
         Return:
             the gradient matrix of the image
         """
-        height, width = self.working_image.shape[:2]
-
+        # generate the gray image
         gray_image = rgb2gray(self.working_image)
         gray_image[self.working_mask == 1] = None
 
+        # calculate gradient on gray image
         gradient = np.nan_to_num(np.array(np.gradient(gray_image)))
-        gradient_val = gradient[0]**2 + gradient[1]**2
-        max_gradient = np.zeros([height, width, 2])
 
-        front_positions = np.argwhere(self.front == 1)
-        for point in front_positions:
+        # calculate the gradient magnitude
+        gradient_val = gradient[0]**2 + gradient[1]**2
+
+        max_gradient = np.zeros([self.height, self.width, 2])
+
+        # find the maximum gradient in each patch of the front points
+        for point in self.front_points:
             patch = self.__get_patch(point)
             patch_x_gradient = self.__get_patch_data(gradient[0], patch)
             patch_y_gradient = self.__get_patch_data(gradient[1], patch)
             patch_gradient_val = self.__get_patch_data(gradient_val, patch)
 
+            # find the maximum gradient position in the patch
             patch_max_pos = np.unravel_index(patch_gradient_val.argmax(),
                                              patch_gradient_val.shape)
 
+            # set to the orthogonal direction of the max gradient
             max_gradient[point[0], point[1],
                          0] = patch_y_gradient[patch_max_pos]
             max_gradient[point[0], point[1],
@@ -183,37 +187,57 @@ class Inpainter():
         """
         max_priority = 0
         max_point = None
+
+        # find the highest priority point in the front points
         for point in self.front_points:
             if max_point is None or self.priority[point[0],
                                                   point[1]] > max_priority:
                 max_priority = self.priority[point[0], point[1]]
                 max_point = point
+
         return max_point
 
     def __find_source_patch(self, target_pixel):
+        """
+        Find the source patch best matching the target patch
+
+        Parameters:
+            target_pixel: the position of the target pixel
+        
+        Return:
+            best matching source patch
+        """
         target_patch = self.__get_patch(target_pixel)
-        height, width = self.working_image.shape[:2]
         patch_height, patch_width = self.__get_patch_shape(target_patch)
 
         best_match = None
         best_match_difference = 0
 
+        # use lab color space to calculate the difference
         lab_image = rgb2lab(self.working_image)
 
-        for x in range(height - patch_height + 1):
-            for y in range(width - patch_width + 1):
+        # iterate through the image to find the best matching source patch
+        for x in range(self.height - patch_height + 1):
+            for y in range(self.width - patch_width + 1):
+
+                # construct the source patch
                 source_patch = [[x, x + patch_height - 1],
                                 [y, y + patch_width - 1]]
-                if self.__get_patch_data(self.working_mask, source_patch) \
-                   .sum() != 0:
+
+                # check if the source patch overlaps with the target patch
+                if self.__get_patch_data(self.working_mask,
+                                         source_patch).sum() != 0:
                     continue
 
+                # calculate the difference between the target patch and the source patch
                 difference = self.__calculate_patch_difference(
                     lab_image, target_patch, source_patch)
 
+                # update the best matching source patch
                 if best_match is None or difference < best_match_difference:
                     best_match = source_patch
                     best_match_difference = difference
+
         return best_match
 
     def __calculate_patch_difference(self, lab_image, target_patch,
@@ -242,28 +266,41 @@ class Inpainter():
 
     def __update_image(self, target_pixel, source_patch):
         """
-        Update the image with the source patch
+        Update the image, mask and confidence with the source patch
 
         Parameters:
             target_pixel: the target pixel
             source_patch: the source patch
         """
         target_patch = self.__get_patch(target_pixel)
-        pixels_positions = np.argwhere(
-            self.__get_patch_data(self.working_mask, target_patch) == 1) + [
-                target_patch[0][0], target_patch[1][0]
-            ]
-        patch_confidence = self.confidence[target_pixel[0], target_pixel[1]]
-        for point in pixels_positions:
-            self.confidence[point[0], point[1]] = patch_confidence
 
+        # relative position of the unfilled pixel in the target patch
+        pixels_positions = np.argwhere(
+            self.__get_patch_data(self.working_mask, target_patch) == 1)
+
+        # bias of the pixels in the target patch
+        x_bias, y_bias = target_patch[0][0], target_patch[1][0]
+
+        # confidence of the target pixel
+        patch_confidence = self.__get_patch_confidence(target_patch)
+
+        # update the confidence of the pixels in the unfilled target patch
+        for point in pixels_positions:
+            self.confidence[point[0] + x_bias,
+                            point[1] + y_bias] = patch_confidence
+
+        # turn the mask of the target patch to 3d
         mask = self.__get_patch_data(self.working_mask, target_patch)
         rgb_mask = self.__2d_to_3d(mask)
+
+        # fetch the data of the source patch and the target patch
         source_data = self.__get_patch_data(self.working_image, source_patch)
         target_data = self.__get_patch_data(self.working_image, target_patch)
 
+        # reserve the already-filled pixels and fill the rest pixels using the source patch
         new_data = source_data * rgb_mask + target_data * (1 - rgb_mask)
 
+        # update the image and the mask
         self.__copy_to_patch(self.working_image, target_patch, new_data)
         self.__copy_to_patch(self.working_mask, target_patch, 0)
 
@@ -325,6 +362,19 @@ class Inpainter():
         """
         return matrix[patch[0][0]:patch[0][1] + 1, patch[1][0]:patch[1][1] + 1]
 
+    def __get_patch_confidence(self, patch):
+        """
+        Get the confidence of the patch
+
+        Parameters:
+            patch: the patch to get the confidence
+
+        Return:
+            the confidence of the patch center pixel
+        """
+        return np.sum(self.__get_patch_data(
+            self.confidence, patch)) / (self.__get_patch_area(patch))
+
     def __copy_to_patch(self, dest_matrix, dest_patch, data):
         """
         Copy the data to the patch in the destination matrix
@@ -375,7 +425,7 @@ class Inpainter():
         plt.draw()
         plt.pause(0.001)
 
-    def __2d_to_3d(self, matrix):
+    def __2d_to_3d(self, matrix, channel_num=3):
         """
         Convert a 2D matrix to a 3D matrix with the same value in each channel
 
@@ -385,4 +435,4 @@ class Inpainter():
         Return: 
             the 3D matrix
         """
-        return np.stack([matrix] * 3, axis=2)
+        return np.stack([matrix] * channel_num, axis=2)
