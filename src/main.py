@@ -22,6 +22,10 @@ def main():
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('input_image',
+                        help='the image containing objects to be removed')
+    parser.add_argument('mask',
+                        help='the mask image of the region to be removed')
     parser.add_argument('-ps',
                         '--patch-size',
                         help='the size of the patches',
@@ -35,10 +39,6 @@ def parse_args():
                         help='plot each generated image',
                         action='store_true',
                         default=False)
-    parser.add_argument('input_image',
-                        help='the image containing objects to be removed')
-    parser.add_argument('mask',
-                        help='the mask image of the region to be removed')
     return parser.parse_args()
 
 
