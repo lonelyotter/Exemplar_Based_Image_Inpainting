@@ -23,6 +23,7 @@ class Inpainter():
 
         # initialize attributes
         self.working_image = image.astype('uint8')
+        self.initial_mask = mask.astype('uint8') // 255  # convert to 0-1
         self.working_mask = mask.astype('uint8') // 255  # convert to 0-1
         self.patch_size = patch_size
         self.plot_progress = plot_progress
@@ -224,8 +225,8 @@ class Inpainter():
                 source_patch = [[x, x + patch_height - 1],
                                 [y, y + patch_width - 1]]
 
-                # check if the source patch overlaps with the target patch
-                if self.__get_patch_data(self.working_mask,
+                # check if the source patch are not totally in the initial source region
+                if self.__get_patch_data(self.initial_mask,
                                          source_patch).sum() != 0:
                     continue
 
@@ -261,6 +262,12 @@ class Inpainter():
         target_data = self.__get_patch_data(lab_image, target_patch) * mask_3d
         source_data = self.__get_patch_data(lab_image, source_patch) * mask_3d
         squared_distance = ((target_data - source_data)**2).sum()
+
+        # calculate the euclidean distance between the target patch and the source patch
+        # euclidean_distance = np.sqrt(
+        #     (target_patch[0][0] - source_patch[0][0])**2 +
+        #     (target_patch[1][0] - source_patch[1][0])**2)
+        # return squared_distance + euclidean_distance
 
         return squared_distance
 
